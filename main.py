@@ -5,22 +5,29 @@ from urllib.parse import urlencode
 from playwright.sync_api import sync_playwright
 from playwright_stealth import Stealth
 
-HEADLESS = True
+HEADLESS = False
+MAX_PRODUCTS_COUNT = 60
 BASE_URL = "https://www.wildberries.ru"
 SEARCH_PARAMS = {
     "sort": "popular",
     "search": "пальто из натуральной шерсти",
 }
-MADEBY = "Россия"
 SEARCH_URL = f"{BASE_URL}/catalog/0/search.aspx?{urlencode(SEARCH_PARAMS)}"
-MAX_PRODUCTS_COUNT = 100
-# MAX_PRODUCTS_COUNT = 5 # for testing
+
+PRICE_TYPE = "final_price" # wallet_price or final_price
+FILTER_CONTRY = "Россия"
+FILTER_MIN_RATING = 4.5
+FILTER_MAX_PRICE = 1000
+
+FILE_NAME = "wb-scraped.xlsx"
+FILE_NAME_FILTERED = "wb-scraped-filtered.xlsx"
+
 LOCATES = {
-    # antibot
+    # Antibot page
     "antibot_title": ".support-title",
     "antibot_subtitle": ".support-subtitle",
 
-    # Catalog
+    # Catalog page
     "catalog_list": "#catalog .product-card-list",
     "catalog_item": ".product-card",
     "catalog_item_link": "a.product-card__link",
@@ -34,9 +41,9 @@ LOCATES = {
     "product_final_price": "[class*='priceBlockFinalPrice']",
 
     # Product characteristics and description
-    "product_characteristics_btn": "[class*='options'] button:has-text('характеристики')",
-    "product_characteristics_modal": "section[data-testid='product_additional_information']",
-    "product_description": "[class*='mo-modal__wrapper'] #section-description p",
+    "product_characteristics_btn": "[class*='options'] [class*='btnDetail'], [class*='options'] [class*='allCharsResaleButton']",
+    "product_characteristics_table": "[class*='detailsModalOverlay'] section[data-testid='product_additional_information'] table",
+    "product_characteristics_description": "[class*='detailsModalOverlay'] #section-description [class*='descriptionText']",
 
     # Product images
     "product_images_slider": ".swiper-wrapper img",
@@ -47,8 +54,8 @@ LOCATES = {
     "product_seller_url": "a[class*='sellerInfoButtonLink']",
 
     # Product sizes
-     "product_size_btn_more": "li[class*='sizesListItemMore'] button",
-     "product_sizes_list": "ul[class*='sizesList']",
+    "product_size_btn_more": "li[class*='sizesListItemMore'] button",
+    "product_sizes_list": "ul[class*='sizesList']",
 
     #Product stock and reviews
     "product_stock_count": "[class*='qtyTrigger'] span",
@@ -56,7 +63,7 @@ LOCATES = {
     "product_rating": ".user-opinion__rating-numb",
     "product_review_count": ".user-opinion__text",
 }
-PRICE_TYPE = "wallet_price" # wallet_price or final_price
+
 COLUMNS_MAP = {
     "url": "Ссылка на товар",
     "article": "Артикул",
@@ -72,19 +79,17 @@ COLUMNS_MAP = {
     "rating": "Рейтинг",
     "review_count": "Количество отзывов",
 }
-FILE_NAME = "wb-scraped.xlsx"
-FILE_NAME_FILTERED = "wb-scraped-filtered.xlsx"
 
 def check_catalog_is_loaded(page):
-    timeout = 15000
+    timeout = 15
     start_time = time.time()
 
-    while (time.time() - start_time) < 1000 * timeout:
+    while (time.time() - start_time) <= timeout:
         catalog_list = page.locator(LOCATES["catalog_list"])
         if catalog_list.is_visible():
             count = catalog_list.locator(LOCATES["catalog_item"]).count()
             if catalog_list.count() > 0:
-                print(f"Catalog loaded! ({count} items)")
+                print(f"> Catalog loaded! ({count} items)")
                 return True
 
         has_antibot_title = "Почти готово..." in page.title()
@@ -92,15 +97,15 @@ def check_catalog_is_loaded(page):
         has_antibot_page_subtitle = page.locator(LOCATES["antibot_subtitle"], has_text="Подозрительная активность с вашего IP").is_visible()
 
         if has_antibot_title and (has_antibot_page_title or has_antibot_page_subtitle):
-            print("Antibot page detected...")
+            print("> Antibot page detected...")
             return False
 
-        time.sleep(0.5)
+        time.sleep(.5)
 
-    print("Timeout reached. Catalog not loaded. Maybe blocked by antibot...")
+    print("> Timeout reached. Catalog not loaded. Maybe blocked by antibot...")
     return False
 
-def collect_products_links(pw_page, max_products_count=MAX_PRODUCTS_COUNT):
+def collect_product_links(pw_page, max_products_count=MAX_PRODUCTS_COUNT):
     links_collection = set()
     scroll_step = 500
     get_new_items_attempts = 0
@@ -108,9 +113,9 @@ def collect_products_links(pw_page, max_products_count=MAX_PRODUCTS_COUNT):
     catalog_items = pw_page.locator(f"{LOCATES["catalog_list"]} {LOCATES["catalog_item"]}")
     catalog_item_link = catalog_items.locator(LOCATES["catalog_item_link"])
 
-    print("Scrolling...")
+    print("> Scrolling...")
 
-    while len(links_collection) < max_products_count:
+    while len(links_collection) <= max_products_count:
         pw_page.mouse.wheel(0, scroll_step)
         time.sleep(random.uniform(0.3, 0.8))
 
@@ -128,10 +133,10 @@ def collect_products_links(pw_page, max_products_count=MAX_PRODUCTS_COUNT):
             get_new_items_attempts += 1
         else:
             get_new_items_attempts = 0
-            print(f"Found {len(links_collection)}/{max_products_count} product links...")
+            print(f"> Found {len(links_collection)}/{max_products_count} product links...")
 
         if get_new_items_attempts > 10:
-            print("Failed to get new items after 10 attempts")
+            print("> Failed to get new items after 10 attempts")
             break
 
     return list(links_collection)
@@ -155,11 +160,141 @@ def extract_rating(text):
     except:
         return 0.0
 
+def open_characteristics_modal(page):
+    characteristics_buttons_locator = page.locator(LOCATES["product_characteristics_btn"]).all()
+
+    for ch_button in characteristics_buttons_locator:
+        if not ch_button.is_visible():
+            continue
+
+        try:
+            time.sleep(.5)
+            ch_button.scroll_into_view_if_needed()
+            ch_button.click(timeout=5000)
+            page.wait_for_selector(LOCATES['product_characteristics_table'], timeout=5000)
+            return True
+        except Exception as e:
+            print("> Failed to open characteristics modal, trying another button. Details: {e}")
+            continue
+
+    return False
+
+def parse_prices(page):
+    wallet_price_selector = page.locator(LOCATES["product_wallet_price"]).first
+    final_price_selector = page.locator(LOCATES["product_final_price"]).first
+
+    wallet_price_selector.wait_for(state='visible', timeout=5000)
+    final_price_selector.wait_for(state='visible', timeout=5000)
+
+    wallet_price = extract_digits(wallet_price_selector.inner_text())
+    final_price = extract_digits(final_price_selector.inner_text())
+
+    if wallet_price <= 0:
+        wallet_price = final_price
+
+    return wallet_price, final_price
+
+def parse_characteristics_table(page):
+    char_tables = page.locator(LOCATES['product_characteristics_table']).all()
+    data = {}
+
+    for table in char_tables:
+        rows = table.locator("tr").all()
+        for row in rows:
+            key_el = row.locator("th").first
+            val_el = row.locator("td").first
+
+            if key_el.is_visible() and val_el.is_visible():
+                key = clean_text(key_el.inner_text())
+                val = clean_text(val_el.inner_text())
+                if key and val:
+                    data[key] = val
+
+    return data
+
+def parse_characteristics_desc(page):
+    char_desciption_locator = page.locator(LOCATES["product_characteristics_description"]).first
+
+    if char_desciption_locator.is_visible():
+        return clean_text(char_desciption_locator.inner_text())
+
+def parse_images(page):
+    imgs = []
+    swiper_elements_locator = page.locator(LOCATES["product_images_slider"]).all()
+
+    for img_item in swiper_elements_locator:
+        src = img_item.get_attribute("src")
+        if src:
+            hq_src = src.replace("/tm/", "/big/").replace("/c246x328/", "/big/")
+            imgs.append(hq_src)
+
+    return ", ".join(list(set(imgs)))
+
+def parse_seller_info(page):
+    seller_default_locator = page.locator(LOCATES["product_seller_name"]).first
+    seller_user_locator = page.locator(LOCATES["product_seller-user_name"]).first
+
+    if seller_default_locator.is_visible():
+        seller_name = seller_default_locator.inner_text()
+    elif seller_user_locator.is_visible():
+        seller_name = f"{seller_user_locator.inner_text()}"
+        # product_data["seller_name"] = f"{seller_user_locator.inner_text()} (Покупатель WB)"
+
+    seller_url_locator = page.locator(LOCATES["product_seller_url"]).first
+    if seller_url_locator.is_visible():
+        seller_href = seller_url_locator.get_attribute("href")
+        if seller_href:
+            seller_url = f"{BASE_URL}{seller_href}"
+
+    return seller_name, seller_url
+
+def parse_product_sizes(page):
+    product_size_btn_more_locator = page.locator(LOCATES["product_size_btn_more"]).first
+    if product_size_btn_more_locator.is_visible():
+        product_size_btn_more_locator.click(force=True)
+        time.sleep(.5)
+
+    sizes_list = []
+    items = page.locator(f"{LOCATES['product_sizes_list']} button").all()
+
+    for item in items:
+        text = item.inner_text().replace("\n", " RU: ").strip()
+        sizes_list.append(clean_text(text))
+
+    return ", ".join(list(set(sizes_list)))
+
+def parse_stock_count(page):
+    stock_count_locator = page.locator(LOCATES["product_stock_count"]).first
+    if stock_count_locator.is_visible():
+        return extract_digits(stock_count_locator.inner_text())
+
+def parse_rating_and_review_count(page):
+    if not page.locator(LOCATES["product_no_reviews"]).first.is_visible():
+        rating_text_locator = page.locator(LOCATES["product_rating"]).first
+        review_count_text_locator = page.locator(LOCATES["product_review_count"]).first
+
+        if rating_text_locator.is_visible():
+            product_rating = extract_rating(rating_text_locator.inner_text())
+
+        if review_count_text_locator.is_visible():
+            product_review_count = extract_digits(review_count_text_locator.inner_text())
+
+    return product_rating, product_review_count
+
 def scrape_product_page(page, url):
+    # Load page and check loading
+    try:
+        page.goto(url, wait_until="domcontentloaded")
+        page.wait_for_selector(LOCATES["product_title"], timeout=5000)
+        time.sleep(.5)
+    except Exception as e:
+        print(f"> Error loading product page: {url}. Details: {e}")
+        return None
+
     product_data = {
         "url": url,
-        "article": "",
-        "name": "",
+        "article": page.locator(LOCATES["product_article"]).inner_text(),
+        "name": page.locator(LOCATES["product_title"]).inner_text(),
         "wallet_price": 0,
         "final_price": 0,
         "description": "",
@@ -173,161 +308,29 @@ def scrape_product_page(page, url):
         "review_count": 0,
     }
 
-    # Load page and check loading
-    try:
-        page.goto(url, wait_until="domcontentloaded")
-        page.wait_for_selector(LOCATES["product_title"], timeout=15000)
-    except Exception as e:
-        print(f"Error loading product page: {url}. Details: {e}")
-        return None
+    product_data["wallet_price"], product_data["final_price"] = parse_prices(page)
+    product_data["seller_name"], product_data["seller_url"] = parse_seller_info(page)
+    product_data["rating"], product_data["review_count"] = parse_rating_and_review_count(page)
+    product_data["images_urls"] = parse_images(page)
+    product_data['sizes'] = parse_product_sizes(page)
+    product_data["stock_count"] = parse_stock_count(page)
 
-    # Characteristics
-    try:
-        characteristics_btn_locator = page.locator(LOCATES["product_characteristics_btn"]).first
-        if characteristics_btn_locator.is_visible():
-            characteristics_btn_locator.scroll_into_view_if_needed()
-            time.sleep(0.5)
-            characteristics_btn_locator.click(force=True)
-            try:
-                page.locator(f"{LOCATES['product_characteristics_modal']} table").first.wait_for(timeout=5000)
-            except: pass
+    modal_opened = open_characteristics_modal(page)
 
-    except Exception as e:
-        print(f"Error: Failed to open characteristics modal: {url}. Details: {e}")
-
-    try:
-        tables = page.locator(f"{LOCATES['product_characteristics_modal']} table").all()
-        data = {}
-
-        for table in tables:
-            rows = table.locator("tr").all()
-            for row in rows:
-                key_el = row.locator("th").first
-                val_el = row.locator("td").first
-
-                if key_el.is_visible() and val_el.is_visible():
-                    key = clean_text(key_el.inner_text())
-                    val = clean_text(val_el.inner_text())
-                    if key and val:
-                        data[key] = val
-
-        description_locator = page.locator(LOCATES["product_description"]).first
-        if description_locator.is_visible():
-            product_data["description"] = clean_text(description_locator.inner_text())
-
-        product_data["characteristics"] = data
-    except Exception as e:
-        print(f"Error: Failed to scrape product characteristics: {url}. Details: {e}")
-
-    # Title
-    try:
-        product_data["name"] = page.locator(LOCATES["product_title"]).inner_text()
-    except Exception as e:
-        print(f"Error: Failed to parse product title: {url}. Details: {e}")
-
-    # Article
-    try:
-        product_data["article"] = page.locator(LOCATES["product_article"]).inner_text()
-    except Exception as e:
-        print(f"Error: Failed to parse product article: {url}. Details: {e}")
-
-    # Prices
-    try:
-        wallet_price_locator = page.locator(LOCATES["product_wallet_price"]).first
-        final_price_locator = page.locator(LOCATES["product_final_price"]).first
-
-        if wallet_price_locator.is_visible():
-            product_data["wallet_price"] = extract_digits(wallet_price_locator.inner_text())
-
-        if final_price_locator.is_visible():
-            product_data["final_price"] = extract_digits(final_price_locator.inner_text())
-    except Exception as e:
-        print(f"Error: Failed to parse product price: {url}. Details: {e}")
-
-    # Images
-    try:
-        imgs = []
-        swiper_elements_locator = page.locator(LOCATES["product_images_slider"]).all()
-
-        for img in swiper_elements_locator:
-            src = img.get_attribute("src")
-            if src:
-                hq_src = src.replace("/tm/", "/big/").replace("/c246x328/", "/big/")
-                imgs.append(hq_src)
-
-        product_data["images_urls"] = ", ".join(list(set(imgs)))
-    except Exception as e:
-        print(f"Error: Failed to parse product images: {url}. Details: {e}")
-
-    # Seller
-    try:
-        seller_default_locator = page.locator(LOCATES["product_seller_name"]).first
-        seller_user_locator = page.locator(LOCATES["product_seller-user_name"]).first
-
-        if seller_default_locator.is_visible():
-            product_data["seller_name"] = seller_default_locator.inner_text()
-        elif seller_user_locator.is_visible():
-            product_data["seller_name"] = f"{seller_user_locator.inner_text()}"
-            # product_data["seller_name"] = f"{seller_user_locator.inner_text()} (Покупатель WB)"
-
-        seller_url_locator = page.locator(LOCATES["product_seller_url"]).first
-        if seller_url_locator.is_visible():
-            seller_href = seller_url_locator.get_attribute("href")
-            if seller_href:
-                product_data["seller_url"] = f"{BASE_URL}{seller_href}"
-    except Exception as e:
-        print(f"Error: Failed to parse product seller name or seller url: {url}. Details: {e}")
-
-    # Sizes
-    try:
-        product_size_btn_more_locator = page.locator(LOCATES["product_size_btn_more"]).first
-        if product_size_btn_more_locator.is_visible():
-            product_size_btn_more_locator.click(force=True)
-            time.sleep(0.5)
-
-        sizes_list = []
-        items = page.locator(f"{LOCATES['product_sizes_list']} button").all()
-
-        for item in items:
-            text = item.inner_text().replace("\n", " RU: ").strip()
-            sizes_list.append(clean_text(text))
-
-        product_data["sizes"] = ", ".join(list(set(sizes_list)))
-    except Exception as e:
-        print(f"Error: Failed to parse product sizes: {url}. Details: {e}")
-
-    # Stock Count
-    try:
-        stock_count_locator = page.locator(LOCATES["product_stock_count"]).first
-        if stock_count_locator.is_visible():
-            product_data["stock_count"] = extract_digits(stock_count_locator.inner_text())
-    except Exception as e:
-        print(f"Error: Failed to parse product stock count: {url}. Details: {e}")
-
-    # Rating and Reviews
-    try:
-        if not page.locator(LOCATES["product_no_reviews"]).first.is_visible():
-            rating_text_locator = page.locator(LOCATES["product_rating"]).first
-            review_count_text_locator = page.locator(LOCATES["product_review_count"]).first
-
-            if rating_text_locator.is_visible():
-                product_data["rating"] = extract_rating(rating_text_locator.inner_text())
-
-            if review_count_text_locator.is_visible():
-                product_data["review_count"] = extract_digits(review_count_text_locator.inner_text())
-    except Exception as e:
-        print(f"Error: Failed to parse product rating and reviews: {url}. Details: {e}")
+    if modal_opened:
+        product_data["characteristics"] = parse_characteristics_table(page)
+        product_data["description"] = parse_characteristics_desc(page)
 
     return product_data
 
-def save_to_excel_simple(filename, data_list, columns_map):
-    if not data_list:
-        print("No data to save!")
+def save_to_excel(filename, data, columns):
+    if not data:
+        print("! Error: No data to save!")
         return
 
-    dataframe = pandas.DataFrame(data_list)
+    dataframe = pandas.DataFrame(data)
 
-    def clean_cell(data):
+    def transform_to_strings(data):
         if isinstance(data, dict):
             lines = []
             for key, value in data.items():
@@ -340,38 +343,39 @@ def save_to_excel_simple(filename, data_list, columns_map):
 
         return data
 
-    dataframe = dataframe.map(clean_cell)
-
-    dataframe = dataframe[list(columns_map.keys())]
-    dataframe = dataframe.rename(columns=columns_map)
-
+    dataframe = dataframe.map(transform_to_strings)
+    dataframe = dataframe[list(columns.keys())]
+    dataframe = dataframe.rename(columns=columns)
     dataframe.to_excel(filename, index=False)
     print(f"File saved: {filename} ({len(dataframe)} rows)")
 
 # Filter products based on criteria
-def is_specific_product(item):
-    characteristic_items = item.get("characteristics", {})
+def filter_products(products):
+    filtered = []
 
-    if not isinstance(characteristic_items, dict):
-        return False
+    for item in products:
+        chars = item.get("characteristics", {})
+        if not isinstance(chars, dict):
+            continue
 
-    country = ""
-    for key, value in characteristic_items.items():
-        if "страна" in key.lower():
-            country = value
-            break
+        country = ""
+        for key, value in chars.items():
+            if "страна" in key.lower():
+                country = value
+                break
 
-    current_rating = float(item.get("rating", 0))
-    current_price = int(item.get(PRICE_TYPE, 0))
+        rating = float(item.get("rating", 0))
+        price = int(item.get(PRICE_TYPE, 0))
 
-    return (
-        current_rating >= 4.5 and
-        current_price < 10000 and
-        MADEBY.lower() in country.lower()
-    )
+        if (rating >= FILTER_MIN_RATING and
+            price < FILTER_MAX_PRICE and
+            FILTER_CONTRY.lower()) in country.lower():
+            filtered.append(item)
+
+    return filtered
 
 def main():
-    print(f"Work with {SEARCH_URL}")
+    print(f"> Work with {SEARCH_URL}")
 
     with Stealth().use_sync(sync_playwright()) as p:
         browser = p.chromium.launch(headless=HEADLESS)
@@ -381,24 +385,23 @@ def main():
             page.goto(SEARCH_URL)
 
             ### Check antibot
-            if check_catalog_is_loaded(page):
-                ### Collect links
-                links = collect_products_links(page, MAX_PRODUCTS_COUNT)
-                print(f"Collected {len(links)} product links: {links[:MAX_PRODUCTS_COUNT]}")
-
-                ### Parse products from links
-                products_data = []
-                for i, link in enumerate(links[:MAX_PRODUCTS_COUNT]):
-                    print(f"[{i+1}/{len(links)}] Product: {link}")
-                    data = scrape_product_page(page, link)
-                    if data:
-                        products_data.append(data)
-
-                    time.sleep(random.uniform(1, 3)) # Delay between product page requests
-
-            else:
-                print("Exiting...")
+            if not check_catalog_is_loaded(page):
+                print("! Failed to load catalog. Exiting...")
                 return
+
+            ### Collect links
+            product_links = collect_product_links(page, MAX_PRODUCTS_COUNT)[:MAX_PRODUCTS_COUNT]
+            print(f"> Collected {len(product_links)} product links")
+
+            ### Parse products from links
+            products_data = []
+            for i, link in enumerate(product_links):
+                print(f"[{i+1}/{len(product_links)}] Product: {link}")
+                data = scrape_product_page(page, link)
+                if data:
+                    products_data.append(data)
+
+                time.sleep(random.uniform(1, 3))
 
         except Exception as e:
             print(f"Error: {e}")
@@ -407,18 +410,13 @@ def main():
 
     ### Save results to Excel
     if products_data:
-        save_to_excel_simple(FILE_NAME, products_data, COLUMNS_MAP)
+        save_to_excel(FILE_NAME, products_data, COLUMNS_MAP)
 
-        filtered_data = []
-        for item in products_data:
-            if is_specific_product(item):
-                filtered_data.append(item)
-
+        filtered_data = filter_products(products_data)
         print(f"Filtered products: {len(filtered_data)}")
+
         if filtered_data:
-            save_to_excel_simple(FILE_NAME_FILTERED, filtered_data, COLUMNS_MAP)
-        else:
-            print("Filtered list is empty, no file created.")
+            save_to_excel(FILE_NAME_FILTERED, filtered_data, COLUMNS_MAP)
 
 if __name__ == "__main__":
     main()
