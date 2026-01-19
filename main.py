@@ -5,7 +5,7 @@ from urllib.parse import urlencode
 from playwright.sync_api import sync_playwright
 from playwright_stealth import Stealth
 
-HEADLESS = False
+HEADLESS = True
 MAX_PRODUCTS_COUNT = 60
 BASE_URL = "https://www.wildberries.ru"
 SEARCH_PARAMS = {
