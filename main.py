@@ -17,7 +17,7 @@ SEARCH_URL = f"{BASE_URL}/catalog/0/search.aspx?{urlencode(SEARCH_PARAMS)}"
 PRICE_TYPE = "final_price" # wallet_price or final_price
 FILTER_CONTRY = "Россия"
 FILTER_MIN_RATING = 4.5
-FILTER_MAX_PRICE = 1000
+FILTER_MAX_PRICE = 10000
 
 FILE_NAME = "wb-scraped.xlsx"
 FILE_NAME_FILTERED = "wb-scraped-filtered.xlsx"
@@ -37,7 +37,7 @@ LOCATES = {
     "product_title": ".product-page [class*='productTitle']",
 
     # Product page prices
-    "product_wallet_price": "[class*='priceBlockWalletPrice'] h2",
+    "product_wallet_price": "[class*='priceBlockWalletPrice']",
     "product_final_price": "[class*='priceBlockFinalPrice']",
 
     # Product characteristics and description
@@ -106,9 +106,8 @@ def check_catalog_is_loaded(page):
     return False
 
 def collect_product_links(pw_page, max_products_count=MAX_PRODUCTS_COUNT):
-    links_collection = set()
     scroll_step = 500
-    get_new_items_attempts = 0
+    links_collection = set()
 
     catalog_items = pw_page.locator(f"{LOCATES["catalog_list"]} {LOCATES["catalog_item"]}")
     catalog_item_link = catalog_items.locator(LOCATES["catalog_item_link"])
@@ -129,14 +128,10 @@ def collect_product_links(pw_page, max_products_count=MAX_PRODUCTS_COUNT):
             except:
                 continue
 
-        if len(links_collection) == founded_links_count:
-            get_new_items_attempts += 1
-        else:
-            get_new_items_attempts = 0
+        if len(links_collection) != founded_links_count:
             print(f"> Found {len(links_collection)}/{max_products_count} product links...")
 
-        if get_new_items_attempts > 10:
-            print("> Failed to get new items after 10 attempts")
+        if founded_links_count >= max_products_count:
             break
 
     return list(links_collection)
@@ -149,6 +144,7 @@ def clean_text(text):
 def extract_digits(text):
     if not text:
         return 0
+    text = clean_text(text)
     digits = ''.join(filter(str.isdigit, text))
     return int(digits) if digits else 0
 
@@ -180,35 +176,56 @@ def open_characteristics_modal(page):
     return False
 
 def parse_prices(page):
-    wallet_price_selector = page.locator(LOCATES["product_wallet_price"]).first
-    final_price_selector = page.locator(LOCATES["product_final_price"]).first
+    wallet_price = 0
+    final_price = 0
 
-    wallet_price_selector.wait_for(state='visible', timeout=5000)
-    final_price_selector.wait_for(state='visible', timeout=5000)
+    try:
+        time.sleep(.5)
 
-    wallet_price = extract_digits(wallet_price_selector.inner_text())
-    final_price = extract_digits(final_price_selector.inner_text())
+        try:
+            wallet_price_selector = page.locator(LOCATES["product_wallet_price"]).first
+            if wallet_price_selector.count() > 0:
+                wallet_price_selector.wait_for(state='visible', timeout=5000)
+                wallet_price = extract_digits(wallet_price_selector.inner_text())
+                print(f"Wallet price: {wallet_price}")
+        except: pass
 
-    if wallet_price <= 0:
-        wallet_price = final_price
+        try:
+            final_price_selector = page.locator(LOCATES["product_final_price"]).first
+            if final_price_selector.count() > 0:
+                final_price_selector.wait_for(state='visible', timeout=5000)
+                final_price = extract_digits(final_price_selector.inner_text())
+                print(f"Final price: {final_price}")
+        except: pass
+
+        if wallet_price <= 0:
+            wallet_price = final_price
+
+    except Exception as e:
+        print(f"> Failed to parse prices. Details: {e}")
 
     return wallet_price, final_price
 
 def parse_characteristics_table(page):
-    char_tables = page.locator(LOCATES['product_characteristics_table']).all()
     data = {}
 
-    for table in char_tables:
-        rows = table.locator("tr").all()
-        for row in rows:
-            key_el = row.locator("th").first
-            val_el = row.locator("td").first
+    try:
+        char_tables = page.locator(LOCATES['product_characteristics_table']).all()
 
-            if key_el.is_visible() and val_el.is_visible():
-                key = clean_text(key_el.inner_text())
-                val = clean_text(val_el.inner_text())
-                if key and val:
-                    data[key] = val
+        for table in char_tables:
+            rows = table.locator("tr").all()
+            for row in rows:
+                key_el = row.locator("th").first
+                val_el = row.locator("td").first
+
+                if key_el.is_visible() and val_el.is_visible():
+                    key = clean_text(key_el.inner_text())
+                    val = clean_text(val_el.inner_text())
+                    if key and val:
+                        data[key] = val
+
+    except Exception as e:
+        print(f"> Failed to parse characteristics table. Details: {e}")
 
     return data
 
@@ -218,19 +235,22 @@ def parse_characteristics_desc(page):
     if char_desciption_locator.is_visible():
         return clean_text(char_desciption_locator.inner_text())
 
+    return ""
+
 def parse_images(page):
     imgs = []
-    swiper_elements_locator = page.locator(LOCATES["product_images_slider"]).all()
 
-    for img_item in swiper_elements_locator:
+    for img_item in page.locator(LOCATES["product_images_slider"]).all():
         src = img_item.get_attribute("src")
         if src:
             hq_src = src.replace("/tm/", "/big/").replace("/c246x328/", "/big/")
             imgs.append(hq_src)
 
-    return ", ".join(list(set(imgs)))
+    return ", ".join(imgs)
 
 def parse_seller_info(page):
+    seller_name, seller_url = "", ""
+
     seller_default_locator = page.locator(LOCATES["product_seller_name"]).first
     seller_user_locator = page.locator(LOCATES["product_seller-user_name"]).first
 
@@ -261,7 +281,7 @@ def parse_product_sizes(page):
         text = item.inner_text().replace("\n", " RU: ").strip()
         sizes_list.append(clean_text(text))
 
-    return ", ".join(list(set(sizes_list)))
+    return ", ".join(sizes_list)
 
 def parse_stock_count(page):
     stock_count_locator = page.locator(LOCATES["product_stock_count"]).first
@@ -269,6 +289,8 @@ def parse_stock_count(page):
         return extract_digits(stock_count_locator.inner_text())
 
 def parse_rating_and_review_count(page):
+    product_rating = 0.0
+    product_review_count = 0
     if not page.locator(LOCATES["product_no_reviews"]).first.is_visible():
         rating_text_locator = page.locator(LOCATES["product_rating"]).first
         review_count_text_locator = page.locator(LOCATES["product_review_count"]).first
@@ -347,7 +369,7 @@ def save_to_excel(filename, data, columns):
     dataframe = dataframe[list(columns.keys())]
     dataframe = dataframe.rename(columns=columns)
     dataframe.to_excel(filename, index=False)
-    print(f"File saved: {filename} ({len(dataframe)} rows)")
+    print(f"! File saved: {filename} ({len(dataframe)} rows)")
 
 # Filter products based on criteria
 def filter_products(products):
@@ -369,7 +391,7 @@ def filter_products(products):
 
         if (rating >= FILTER_MIN_RATING and
             price < FILTER_MAX_PRICE and
-            FILTER_CONTRY.lower()) in country.lower():
+            FILTER_CONTRY.lower() in country.lower()):
             filtered.append(item)
 
     return filtered
