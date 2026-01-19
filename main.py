@@ -187,7 +187,6 @@ def parse_prices(page):
             if wallet_price_selector.count() > 0:
                 wallet_price_selector.wait_for(state='visible', timeout=5000)
                 wallet_price = extract_digits(wallet_price_selector.inner_text())
-                print(f"Wallet price: {wallet_price}")
         except: pass
 
         try:
@@ -195,7 +194,6 @@ def parse_prices(page):
             if final_price_selector.count() > 0:
                 final_price_selector.wait_for(state='visible', timeout=5000)
                 final_price = extract_digits(final_price_selector.inner_text())
-                print(f"Final price: {final_price}")
         except: pass
 
         if wallet_price <= 0:
